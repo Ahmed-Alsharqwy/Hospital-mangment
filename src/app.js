@@ -1,18 +1,16 @@
 // src/app.js
 require('dotenv').config();
-require('express-async-errors'); // Must be before express
+require('express-async-errors');
 
 const express     = require('express');
 const cors        = require('cors');
 const helmet      = require('helmet');
 const morgan      = require('morgan');
 const compression = require('compression');
-const http        = require('http');
-const { Server }  = require('socket.io');
 
-const { testConnection } = require('./db/knex');
-const errorHandler        = require('./middleware/errorHandler');
-const rateLimiter         = require('./middleware/rateLimiter');
+const { db, testConnection } = require('./db/knex');
+const errorHandler = require('./middleware/errorHandler');
+const rateLimiter  = require('./middleware/rateLimiter');
 
 // ── Routes ──────────────────────────────────
 const authRoutes           = require('./modules/auth/auth.routes');
@@ -27,115 +25,46 @@ const dashboardRoutes      = require('./modules/dashboard/dashboard.routes');
 const notificationsRoutes  = require('./modules/notifications/notifications.routes');
 const analyticsRoutes      = require('./modules/analytics/analytics.routes');
 const settingsRoutes       = require('./modules/settings/settings.routes');
-const permissionsRoutes     = require('./modules/permissions/permissions.routes');
+const permissionsRoutes    = require('./modules/permissions/permissions.routes');
 
-const app    = express();
-const server = http.createServer(app);
-
-// ── Socket.io ────────────────────────────────
-const io = new Server(server, {
-  cors: {
-    origin: process.env.CORS_ORIGINS?.split(',') || '*',
-    methods: ['GET', 'POST'],
-  },
-});
-
-// Make io accessible from anywhere via req.app.get('io')
-app.set('io', io);
-
-io.on('connection', (socket) => {
-  console.log(`🔌 Socket connected: ${socket.id}`);
-
-  // Join a room by userId so we can push personal notifications
-  socket.on('join', (userId) => {
-    socket.join(`user:${userId}`);
-    console.log(`Socket ${socket.id} joined room user:${userId}`);
-  });
-
-  socket.on('disconnect', () => {
-    console.log(`🔌 Socket disconnected: ${socket.id}`);
-  });
-});
-
-// ── Security middlewares ──────────────────────
-app.use(helmet({
-  contentSecurityPolicy: false, // Disable CSP if it interferes with Vite dev or specific medical images
-  crossOriginResourcePolicy: { policy: "cross-origin" },
-}));
-app.use(compression());
-
-// Global rate limiter: max 100 requests per minute per IP
-app.use(rateLimiter({
-  windowMs: 60 * 1000,
-  max: 100,
-  message: 'لقد تجاوزت عدد الطلبات المسموح بها، يرجى المحاولة لاحقاً.'
-}));
-
-const allowedOrigins = process.env.CORS_ORIGINS?.split(',') || ['http://localhost:3000'];
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-    callback(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-}));
-
-// ── Logging ──────────────────────────────────
-if (process.env.NODE_ENV !== 'test') {
-  app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-}
-
-// ── Body parsing ─────────────────────────────
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-// ── Static files (uploads) ───────────────────
-const { authenticate } = require('./middleware/auth');
-app.use('/uploads', authenticate, express.static(process.env.UPLOAD_DIR || './uploads'));
-
-// ── Health check ─────────────────────────────
-app.get('/health', (req, res) => {
-  res.json({
-    status:    'ok',
-    timestamp: new Date().toISOString(),
-    version:   process.env.API_VERSION || 'v1',
-    env:       process.env.NODE_ENV,
-  });
-});
-
-// ── API Routes ───────────────────────────────
+const app = express();
 const api = `/api/${process.env.API_VERSION || 'v1'}`;
 
-app.use(`${api}/auth`,            authRoutes);
-app.use(`${api}/dashboard`,       dashboardRoutes);
-app.use(`${api}/patients`,        patientsRoutes);
-app.use(`${api}/doctors`,         doctorsRoutes);
-app.use(`${api}/nurses`,          nursesRoutes);
-app.use(`${api}/appointments`,    appointmentsRoutes);
-app.use(`${api}/medical-records`, medicalRecordsRoutes);
-app.use(`${api}/prescriptions`,   prescriptionsRoutes);
-app.use(`${api}/invoices`,        invoicesRoutes);
-app.use(`${api}/notifications`,   notificationsRoutes);
-app.use(`${api}/analytics`,       analyticsRoutes);
-app.use(`${api}/settings`,        settingsRoutes);
-app.use(`${api}/permissions`,     permissionsRoutes);
+// ── Middleware ──────────────────────────────
+app.use(helmet());
+app.use(cors({ origin: '*' }));
+app.use(morgan('dev'));
+app.use(compression());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+app.use(rateLimiter);
 
-// ── Temporary Remote Seeding Route ───────────
+// ── Root / Health ───────────────────────────
+app.get('/', (req, res) => {
+  res.json({ message: 'Medical Hub API is running' });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date(), version: 'v1', env: process.env.NODE_ENV });
+});
+
+// ── Magic Seeding Route (Temporary) ──────────
 app.get(`${api}/seed-database`, async (req, res) => {
   try {
     const bcrypt = require('bcryptjs');
     const { v4: uuidv4 } = require('uuid');
-    const { db } = require('./db/knex');
 
-    // 1. Create Organization
+    await db.raw('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
+
+    // Create Org
     const [org] = await db('organizations').insert({
       id: uuidv4(),
-      name: 'مركز الطبي التخصصي',
-      name_ar: 'Medical Hub Center',
+      name: 'Medical Hub Center',
+      name_ar: 'المركز الطبي التخصصي',
       type: 'clinic'
     }).returning('*');
 
-    // 2. Create Branch
+    // Create Branch
     const [branch] = await db('branches').insert({
       id: uuidv4(),
       org_id: org.id,
@@ -144,7 +73,7 @@ app.get(`${api}/seed-database`, async (req, res) => {
       is_main: true
     }).returning('*');
 
-    // 3. Create Admin User
+    // Create Admin
     const passwordHash = await bcrypt.hash('admin123', 10);
     await db('users').insert({
       id: uuidv4(),
@@ -152,10 +81,11 @@ app.get(`${api}/seed-database`, async (req, res) => {
       email: 'admin@medical.com',
       password_hash: passwordHash,
       role: 'super_admin',
-      full_name: 'System Admin'
+      full_name: 'System Admin',
+      is_active: true
     });
 
-    // 4. Create Role Permissions
+    // Create Permissions Table & Data
     const hasTable = await db.schema.hasTable('role_permissions');
     if (!hasTable) {
       await db.schema.createTable('role_permissions', (table) => {
@@ -171,52 +101,54 @@ app.get(`${api}/seed-database`, async (req, res) => {
 
       const roles = ['super_admin', 'admin', 'doctor', 'nurse', 'receptionist'];
       const modules = ['patients', 'appointments', 'billing', 'reports', 'settings', 'records', 'permissions'];
-      
       const seedData = [];
       for (const role of roles) {
         for (const module of modules) {
           const isSuper = role === 'super_admin';
-          const isAdmin = role === 'admin';
           seedData.push({
-            role,
-            module,
-            can_view: isSuper || isAdmin || (role === 'doctor' && module !== 'settings'),
-            can_create: isSuper || isAdmin,
-            can_edit: isSuper || isAdmin,
-            can_delete: isSuper,
+            role, module,
+            can_view: true,
+            can_create: isSuper,
+            can_edit: isSuper,
+            can_delete: isSuper
           });
         }
       }
       await db('role_permissions').insert(seedData);
     }
 
-    res.json({ success: true, message: 'Database seeded successfully!' });
+    res.json({ success: true, message: 'Database initialized! Login with admin@medical.com / admin123' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ── 404 handler ──────────────────────────────
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    message: `Route ${req.method} ${req.path} not found`,
-    code:    'ROUTE_NOT_FOUND',
-  });
-});
+// ── API Routes ───────────────────────────────
+app.use(`${api}/auth`,            authRoutes);
+app.use(`${api}/dashboard`,       dashboardRoutes);
+app.use(`${api}/patients`,        patientsRoutes);
+app.use(`${api}/doctors`,         doctorsRoutes);
+app.use(`${api}/nurses`,          nursesRoutes);
+app.use(`${api}/appointments`,    appointmentsRoutes);
+app.use(`${api}/medical-records`, medicalRecordsRoutes);
+app.use(`${api}/prescriptions`,   prescriptionsRoutes);
+app.use(`${api}/invoices`,        invoicesRoutes);
+app.use(`${api}/notifications`,   notificationsRoutes);
+app.use(`${api}/analytics`,       analyticsRoutes);
+app.use(`${api}/settings`,        settingsRoutes);
+app.use(`${api}/permissions`,     permissionsRoutes);
 
-// ── Global error handler ──────────────────────
+// ── Error Handling ───────────────────────────
 app.use(errorHandler);
 
-// Export for Vercel
-module.exports = app;
-
-// Start server locally if not on Vercel
+// Conditional Start for Local Development
 if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
-  const PORT = parseInt(process.env.PORT) || 5000;
+  const PORT = process.env.PORT || 5000;
   testConnection().then(() => {
-    server.listen(PORT, () => {
-      console.log(`\n🚀 Medical Hub API running locally on port ${PORT}\n`);
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on http://localhost:${PORT}`);
     });
-  }).catch(err => console.error('Failed to start server:', err));
+  });
 }
+
+module.exports = app;
