@@ -50,11 +50,18 @@ app.get('/health', (req, res) => {
 
 // ── Magic Seeding Route (Temporary) ──────────
 app.get(`${api}/seed-database`, async (req, res) => {
+  console.log('--- STARTING REMOTE SEED ---');
   try {
     const bcrypt = require('bcryptjs');
     const { v4: uuidv4 } = require('uuid');
 
+    // Test connection first with a timeout
+    console.log('Testing DB connection...');
+    await db.raw('SELECT 1').timeout(5000); 
+    console.log('DB Connection OK');
+
     await db.raw('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
+    console.log('Extension checked');
 
     // Create Org
     const [org] = await db('organizations').insert({
