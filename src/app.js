@@ -120,6 +120,82 @@ app.use(`${api}/analytics`,       analyticsRoutes);
 app.use(`${api}/settings`,        settingsRoutes);
 app.use(`${api}/permissions`,     permissionsRoutes);
 
+// ── Temporary Remote Seeding Route ───────────
+app.get(`${api}/seed-database`, async (req, res) => {
+  try {
+    const bcrypt = require('bcryptjs');
+    const { v4: uuidv4 } = require('uuid');
+    const { db } = require('./db/knex');
+
+    // 1. Create Organization
+    const [org] = await db('organizations').insert({
+      id: uuidv4(),
+      name: 'مركز الطبي التخصصي',
+      name_ar: 'Medical Hub Center',
+      type: 'clinic'
+    }).returning('*');
+
+    // 2. Create Branch
+    const [branch] = await db('branches').insert({
+      id: uuidv4(),
+      org_id: org.id,
+      name: 'Main Branch',
+      name_ar: 'الفرع الرئيسي',
+      is_main: true
+    }).returning('*');
+
+    // 3. Create Admin User
+    const passwordHash = await bcrypt.hash('admin123', 10);
+    await db('users').insert({
+      id: uuidv4(),
+      branch_id: branch.id,
+      email: 'admin@medical.com',
+      password_hash: passwordHash,
+      role: 'super_admin',
+      full_name: 'System Admin'
+    });
+
+    // 4. Create Role Permissions
+    const hasTable = await db.schema.hasTable('role_permissions');
+    if (!hasTable) {
+      await db.schema.createTable('role_permissions', (table) => {
+        table.uuid('id').primary().defaultTo(db.raw('uuid_generate_v4()'));
+        table.string('role').notNullable();
+        table.string('module').notNullable();
+        table.boolean('can_view').defaultTo(false);
+        table.boolean('can_create').defaultTo(false);
+        table.boolean('can_edit').defaultTo(false);
+        table.boolean('can_delete').defaultTo(false);
+        table.unique(['role', 'module']);
+      });
+
+      const roles = ['super_admin', 'admin', 'doctor', 'nurse', 'receptionist'];
+      const modules = ['patients', 'appointments', 'billing', 'reports', 'settings', 'records', 'permissions'];
+      
+      const seedData = [];
+      for (const role of roles) {
+        for (const module of modules) {
+          const isSuper = role === 'super_admin';
+          const isAdmin = role === 'admin';
+          seedData.push({
+            role,
+            module,
+            can_view: isSuper || isAdmin || (role === 'doctor' && module !== 'settings'),
+            can_create: isSuper || isAdmin,
+            can_edit: isSuper || isAdmin,
+            can_delete: isSuper,
+          });
+        }
+      }
+      await db('role_permissions').insert(seedData);
+    }
+
+    res.json({ success: true, message: 'Database seeded successfully!' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── 404 handler ──────────────────────────────
 app.use((req, res) => {
   res.status(404).json({
